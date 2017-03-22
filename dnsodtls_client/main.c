@@ -71,7 +71,8 @@ int handle_socket_error()
 
 int handle_ssl_error(SSL *ssl, int code, char* buf)
 {
-    switch (SSL_get_error(ssl, code))
+    int a = SSL_get_error(ssl, code);
+    switch (a)
     {
     case SSL_ERROR_NONE:
         break;
@@ -98,7 +99,7 @@ int handle_ssl_error(SSL *ssl, int code, char* buf)
     return 0;
 }
 
-void start(char *remote_address, int remote_port, char *local_address, char *dns_address)
+void start(char *remote_address, int remote_port, char *dns_address)
 {
     union mysockaddr remote_addr, local_addr, dns_from_addr, dns_local_addr;
     char buf[BUFFER_SIZE];
@@ -165,40 +166,6 @@ void start(char *remote_address, int remote_port, char *local_address, char *dns
     if (dtls_fd < 0)
     {
         exit(-1);
-    }
-
-    if (strlen(local_address) > 0)
-    {
-        if (inet_pton(AF_INET, local_address, &local_addr.s4.sin_addr) == 1)
-        {
-            local_addr.s4.sin_family = AF_INET;
-#ifdef HAVE_SIN_LEN
-            local_addr.s4.sin_len = sizeof(struct sockaddr_in);
-#endif
-            local_addr.s4.sin_port = htons(0);
-        }
-        else if (inet_pton(AF_INET6, local_address, &local_addr.s6.sin6_addr) == 1)
-        {
-            local_addr.s6.sin6_family = AF_INET6;
-#ifdef HAVE_SIN6_LEN
-            local_addr.s6.sin6_len = sizeof(struct sockaddr_in6);
-#endif
-            local_addr.s6.sin6_port = htons(0);
-        }
-        else
-        {
-            exit(-1);
-        }
-
-        OPENSSL_assert(remote_addr.ss.ss_family == local_addr.ss.ss_family);
-        if (local_addr.ss.ss_family == AF_INET)
-        {
-            bind(dtls_fd, (const struct sockaddr *) &local_addr, sizeof(struct sockaddr_in));
-        }
-        else
-        {
-            bind(dtls_fd, (const struct sockaddr *) &local_addr, sizeof(struct sockaddr_in6));
-        }
     }
 
     OpenSSL_add_ssl_algorithms();
@@ -373,8 +340,8 @@ void start(char *remote_address, int remote_port, char *local_address, char *dns
         //DTLS Read
         if(!(SSL_get_shutdown(ssl) & SSL_RECEIVED_SHUTDOWN))
         {
-            len = SSL_read(ssl, buf, sizeof(buf));
-            if(len != -1)
+            ret = SSL_read(ssl, buf, sizeof(buf));
+            if(ret != -1)
             {
                 printf("Received %d bytes from DTLS server\n", len);
                 //send to client
@@ -382,26 +349,25 @@ void start(char *remote_address, int remote_port, char *local_address, char *dns
                 session *current_session = get_session(session_list, id);
                 if(current_session != NULL)
                 {
-                    dns_from_addr = current_session->from;
-                    from_len =  sizeof(dns_from_addr);
+                    from_len =  sizeof(current_session->from);
 
-                    len = sendto(dns_fd, buf, len, 0, (struct sockaddr *)&dns_from_addr, len);
+                    len = sendto(dns_fd, buf, len, 0, (struct sockaddr *)&current_session->from, from_len);
                     if(len == -1)
                     {
-                        printf("Error: failed to send DNS response\n");
+                         printf("Error: failed to send DNS response\n");
                         //  exit(EXIT_FAILURE);
                     }
                     else
                     {
-                        if(dns_from_addr.ss.ss_family == AF_INET)
+                        if(current_session->from.ss.ss_family == AF_INET)
                         {
                             printf("Sent DNS Response to %s\n",
-                                   inet_ntop(AF_INET, &dns_from_addr.s4.sin_addr, addrbuf, INET6_ADDRSTRLEN));
+                                   inet_ntop(AF_INET, &current_session->from.s4.sin_addr, addrbuf, INET6_ADDRSTRLEN));
                         }
                         else
                         {
                             printf("Sent DNS Response to %s\n",
-                                   inet_ntop(AF_INET6, &dns_from_addr.s6.sin6_addr, addrbuf, INET6_ADDRSTRLEN));
+                                   inet_ntop(AF_INET6, &current_session->from.s6.sin6_addr, addrbuf, INET6_ADDRSTRLEN));
                         }
                     }
                     remove_session(&session_list, &current_session);
@@ -427,11 +393,10 @@ void start(char *remote_address, int remote_port, char *local_address, char *dns
 int main(int argc, char **argv)
 {
     char *remote_address = "::1";
-    char *local_address = "::1";
     char *dns_server_address = "127.0.0.1";
     int remote_port = 853;
 
-    start(remote_address, remote_port, local_address, dns_server_address);
+    start(remote_address, remote_port, dns_server_address);
 
     return 0;
 }
