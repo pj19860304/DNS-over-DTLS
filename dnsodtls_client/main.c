@@ -340,8 +340,8 @@ void start(char *remote_address, int remote_port, char *dns_address)
         //DTLS Read
         if(!(SSL_get_shutdown(ssl) & SSL_RECEIVED_SHUTDOWN))
         {
-            ret = SSL_read(ssl, buf, sizeof(buf));
-            if(ret != -1)
+            len = SSL_read(ssl, buf, sizeof(buf));
+            if(len != -1)
             {
                 printf("Received %d bytes from DTLS server\n", len);
                 //send to client
@@ -381,7 +381,7 @@ void start(char *remote_address, int remote_port, char *dns_address)
             }
             else
             {
-                handle_ssl_error(ssl, ret, buf);
+                handle_ssl_error(ssl, len, buf);
             }
         }
 
@@ -392,7 +392,7 @@ void start(char *remote_address, int remote_port, char *dns_address)
 
 int main(int argc, char **argv)
 {
-    char *remote_address = "::1";
+    char *remote_address = "202.112.51.154";
     char *dns_server_address = "127.0.0.1";
     int remote_port = 853;
 
