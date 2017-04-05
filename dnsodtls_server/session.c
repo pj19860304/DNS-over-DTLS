@@ -97,8 +97,11 @@ int remove_session(session **psession_list, session **psession)
         (*psession)->prev->next = (*psession)->next;
     else
         *psession_list = (*psession)->next;
-
+#if _WIN64
+	closesocket((*psession)->dns_fd);
+#else
     close((*psession)->dns_fd);
+#endif
     SSL_free((*psession)->ssl);
     free(*psession);
     return 1;

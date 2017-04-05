@@ -1,4 +1,4 @@
-#ifdef WIN32
+#ifdef _WIN64
 #include <winsock2.h>
 #include <Ws2tcpip.h>
 #define in_port_t u_short

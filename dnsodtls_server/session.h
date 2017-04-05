@@ -1,4 +1,4 @@
-#ifdef WIN32
+#ifdef _WIN64
 #include <winsock2.h>
 #include <Ws2tcpip.h>
 #define in_port_t u_short
@@ -53,6 +53,3 @@ session *add_session(session **psession_list, union mysockaddr server_addr,
                      union mysockaddr client_addr, SSL *ssl, BIO *for_reading,
                      BIO *for_writing, int dns_fd);
 int remove_session(session **psession_list, session **psession);
-
-
-
