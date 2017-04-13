@@ -145,16 +145,6 @@ void init_dtls_socket()
 	{
 		exit(EXIT_FAILURE);
 	}
-	/*
-	if (remote_addr.ss.ss_family == AF_INET)
-	{
-	connect(dtls_fd, (struct sockaddr *) &remote_addr, sizeof(struct sockaddr_in));
-	}
-	else
-	{
-	connect(dtls_fd, (struct sockaddr *) &remote_addr, sizeof(struct sockaddr_in6));
-	}*/
-
 	connect(dtls_fd, (struct sockaddr *) &remote_addr, sizeof(remote_addr));
 }
 
@@ -215,8 +205,8 @@ void create_ssl()
 	if (veryverbose && SSL_get_peer_certificate(ssl))
 	{
 		printf("------------------------------------------------------------\n");
-		/*	X509_NAME_print_ex_fp(stdout, X509_get_subject_name(SSL_get_peer_certificate(ssl)),
-				1, XN_FLAG_MULTILINE);*/
+	/*	X509_NAME_print_ex_fp(stdout, X509_get_subject_name(SSL_get_peer_certificate(ssl)),
+			1, XN_FLAG_MULTILINE);*/
 
 		printf("\n\n Cipher: %s", SSL_CIPHER_get_name(SSL_get_current_cipher(ssl)));
 		printf("\n------------------------------------------------------------\n\n");
@@ -230,40 +220,17 @@ void reconnect()
 	create_ssl(dtls_fd);
 }
 
-#ifdef  _WIN32
-DWORD WINAPI maintain_connection_state(LPVOID *info) {
-#else
-void* maintain_connection_state(void *info) {
-#endif
-	while (1)
-	{
-		time(&now);
-		if (-1 != SSL_heartbeat(ssl))
-		{
-			time(&active_time);
-		}
-		if (now - active_time > SESSION_TIMEOUT)
-		{
-			printf("DTLS session timed out.\n");
-			exit(EXIT_FAILURE);
-		}
-#ifdef _WIN32
-		Sleep(1000);
-#else
-		usleep(1000);
-#endif
-	}
-}
-
 void start()
 {
 	union mysockaddr dns_from_addr;
-	int ret, len;
+	int ret;
 	unsigned short transaction_id;
+	int len;
 	struct timeval dtls_timeout;
 	struct timeval dns_timeout;
 	fd_set fds;
 	int sessioncount = 0;
+	int count = 0;
 	session *current_session;
 	socklen_t from_len = sizeof(dns_from_addr);
 	memset((void *)&dns_from_addr, 0, sizeof(struct sockaddr_storage));
@@ -274,19 +241,6 @@ void start()
 	create_ssl(dtls_fd);
 
 	time(&active_time);
-
-#ifdef _WIN32
-	DWORD tid;
-	if (CreateThread(NULL, 0, maintain_connection_state, NULL, 0, &tid) == NULL) {
-		exit(EXIT_FAILURE);
-	}
-#else
-	pthread_t tid;
-	if (pthread_create(&tid, NULL, maintain_connection_state, NULL) != 0) {
-		//  perror("pthread_create");
-		exit(EXIT_FAILURE);
-	}
-#endif
 
 	while (1)
 	{
@@ -368,7 +322,7 @@ void start()
 			}
 		}
 
-		//DTLS Read		
+		//DTLS Read
 		dtls_timeout.tv_sec = 0;
 		dtls_timeout.tv_usec = 50;
 		FD_ZERO(&fds);
@@ -454,6 +408,22 @@ void start()
 			{
 				current_session = current_session->next;
 			}
+		}
+		
+		count++;
+		if (count == 1000)
+		{			
+			//Send heartbeat. Requires Heartbeat extension.
+			if (-1 != SSL_heartbeat(ssl))
+			{
+				time(&active_time);
+			}
+			if (now - active_time > SESSION_TIMEOUT)
+			{
+				printf("DTLS session timed out.\n");
+				exit(EXIT_FAILURE);
+			}
+			count = 0;
 		}
 	}
 }
