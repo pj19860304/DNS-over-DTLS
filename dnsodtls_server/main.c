@@ -2,6 +2,8 @@
 
 #define BUFFER_SIZE          65536
 #define COOKIE_SECRET_LENGTH 16
+#define SESSION_TIMEOUT 10 //second
+#define SSL_ACCEPT_TIMEOUT 10 //second
 
 int verbose = 1;
 int veryverbose = 1;
@@ -17,7 +19,7 @@ char buf[BUFFER_SIZE];
 union mysockaddr server_addr, dns_addr;
 SSL_CTX *ctx;
 
-#if _WIN64
+#if _WIN32
 #pragma comment(lib,"ws2_32.lib")
 #pragma comment(lib,"libssl.lib")
 #pragma comment(lib,"libcrypto.lib")
@@ -27,7 +29,7 @@ static pthread_mutex_t* mutex_buf = NULL;
 #endif
 
 static unsigned long id_function(void) {
-#ifdef _WIN64
+#ifdef _WIN32
 	return (unsigned long)GetCurrentThreadId();
 #else
 	return (unsigned long) pthread_self();
@@ -37,7 +39,7 @@ static unsigned long id_function(void) {
 int THREAD_setup() {
 	int i;
 
-#ifdef _WIN64
+#ifdef _WIN32
 	mutex_buf = (HANDLE*)malloc(CRYPTO_num_locks() * sizeof(HANDLE));
 #else
 	mutex_buf = (pthread_mutex_t*) malloc(CRYPTO_num_locks() * sizeof(pthread_mutex_t));
@@ -45,7 +47,7 @@ int THREAD_setup() {
 	if (!mutex_buf)
 		return 0;
 	for (i = 0; i < CRYPTO_num_locks(); i++)
-#ifdef _WIN64
+#ifdef _WIN32
 		mutex_buf[i] = CreateMutex(NULL, FALSE, NULL);
 #else
 		pthread_mutex_init(&mutex_buf[i], NULL);
@@ -64,7 +66,7 @@ int THREAD_cleanup() {
 	CRYPTO_set_id_callback(NULL);
 	CRYPTO_set_locking_callback(NULL);
 	for (i = 0; i < CRYPTO_num_locks(); i++)
-#ifdef _WIN64
+#ifdef _WIN32
 		CloseHandle(mutex_buf[i]);
 #else
 		pthread_mutex_destroy(&mutex_buf[i]);
@@ -243,7 +245,7 @@ void init_ssl_ctx()
 	SSL_CTX_set_cookie_verify_cb(ctx, verify_cookie);
 }
 
-#ifdef _WIN64
+#ifdef _WIN32
 DWORD WINAPI connection_handle(LPVOID *info) {
 #else
 void* connection_handle(void *info) {
@@ -254,7 +256,9 @@ void* connection_handle(void *info) {
 	SSL *ssl = pinfo->ssl;
 	int ret, err_code, len;
 
-#ifndef _WIN64
+	pinfo->thread_status = THREAD_STATUS_RUNNING;
+
+#ifndef _WIN32
 	pthread_detach(pthread_self());
 #endif
 
@@ -267,16 +271,23 @@ void* connection_handle(void *info) {
 		err_code = ERR_get_error();
 		if (err_code != SSL_ERROR_NONE)
 		{
+			pinfo->thread_status = THREAD_STATUS_DEAD;
 			printf("SSL handshake error:%s\n", ERR_error_string(err_code, buf));
-#if _WIN64
+#if _WIN32
 			ExitThread(0);
 #else
 			pthread_exit((void *)NULL);
 #endif
 		}
 	}
-
-	pinfo->ssl_status = SSL_STATUS_OK;
+	OSSL_HANDSHAKE_STATE state = SSL_get_state(pinfo->ssl);
+	if (state == DTLS_ST_SW_HELLO_VERIFY_REQUEST) {
+		pinfo->ssl_status = SSL_STATUS_OK;
+	}
+	else {
+		pinfo->ssl_status = SSL_STATUS_ERR;
+		return 0;
+	}
 
 	if (verbose) {
 		if (pinfo->client_addr.ss.ss_family == AF_INET) {
@@ -306,7 +317,7 @@ void* connection_handle(void *info) {
 	fd_set fds;
 	FD_ZERO(&fds);
 	struct timeval dns_timeout;
-	while (1)
+	while (pinfo->thread_status == THREAD_STATUS_RUNNING)
 	{
 		dns_timeout.tv_sec = 0;
 		dns_timeout.tv_usec = 5;
@@ -321,7 +332,7 @@ void* connection_handle(void *info) {
 			else {
 				printf("Received %d bytes from dns server\n", len);
 
-				if (!(SSL_get_shutdown(pinfo->ssl) & SSL_RECEIVED_SHUTDOWN)) {
+				if (pinfo->ssl_status == SSL_STATUS_OK && !(SSL_get_shutdown(pinfo->ssl) & SSL_RECEIVED_SHUTDOWN)) {
 					if (SSL_write(pinfo->ssl, buf, len) > 0) {
 						printf("Sent %d bytes to dtls client\n", len);
 					}
@@ -330,9 +341,9 @@ void* connection_handle(void *info) {
 					}
 				}
 				else {
-					remove_session(&session_list, &pinfo);
-					printf("Error: Unable to send data to client because SSL has shutdown\n");
-#if _WIN64
+					printf("Error: Unable to send data to client because SSL has shutdown, exit Thread\n");
+					pinfo->thread_status = THREAD_STATUS_DEAD;
+#if _WIN32
 					ExitThread(0);
 #else
 					pthread_exit((void *)NULL);
@@ -341,21 +352,24 @@ void* connection_handle(void *info) {
 			}
 		}
 	}
+	pinfo->thread_status = THREAD_STATUS_DEAD;
+	return 0;
 }
 
 void start() {
 	int dtls_fd;
 	const int on = 1, off = 0;
 	union mysockaddr client_addr;
+	time_t now;
 
-#if _WIN64
+#if _WIN32
 	DWORD tid;
 	WSADATA wsaData;
 	WSAStartup(MAKEWORD(2, 2), &wsaData);
 #else
 	pthread_t tid;
 #endif
-	
+
 	THREAD_setup();
 	init_ssl_ctx();
 
@@ -444,7 +458,7 @@ void start() {
 
 					BIO_write(current_session->for_reading, buf, len);
 
-#ifdef _WIN64
+#ifdef _WIN32
 					if (CreateThread(NULL, 0, connection_handle, current_session, 0, &tid) == NULL) {
 						exit(EXIT_FAILURE);
 					}
@@ -454,65 +468,72 @@ void start() {
 						exit(EXIT_FAILURE);
 					}
 #endif
-				} else {
+				}
+				else {
 					// write the received buffer from the UDP socket to the memory-based input bio
 					BIO_write(current_session->for_reading, buf, len);
 
 					// Tell openssl to process the packet now stored in the memory bio
 					if (current_session->ssl_status == SSL_STATUS_OK) {
-						if (SSL_get_shutdown(current_session->ssl) & SSL_RECEIVED_SHUTDOWN) {
-							remove_session(&session_list, &current_session);
-						}
-						else {
-							len = SSL_read(current_session->ssl, buf, BUFFER_SIZE);
-
-							if (len > 0) {
-								if (verbose) {
-									if (current_session->client_addr.ss.ss_family == AF_INET) {
-										printf("Received data from %s:%d, length:%d\n",
-											inet_ntop(AF_INET, &current_session->client_addr.s4.sin_addr, addrbuf, INET6_ADDRSTRLEN),
-											ntohs(current_session->client_addr.s4.sin_port), len);
-									}
-									else {
-										printf("Received data from %s:%d, length:%d\n",
-											inet_ntop(AF_INET6, &current_session->client_addr.s6.sin6_addr, addrbuf, INET6_ADDRSTRLEN),
-											ntohs(current_session->client_addr.s6.sin6_port), len);
-									}
-
+						len = SSL_read(current_session->ssl, buf, BUFFER_SIZE);
+						time(&current_session->active_time);
+						if (len > 0) {
+							if (verbose) {
+								if (current_session->client_addr.ss.ss_family == AF_INET) {
+									printf("Received data from %s:%d, length:%d\n",
+										inet_ntop(AF_INET, &current_session->client_addr.s4.sin_addr, addrbuf, INET6_ADDRSTRLEN),
+										ntohs(current_session->client_addr.s4.sin_port), len);
+								}
+								else {
+									printf("Received data from %s:%d, length:%d\n",
+										inet_ntop(AF_INET6, &current_session->client_addr.s6.sin6_addr, addrbuf, INET6_ADDRSTRLEN),
+										ntohs(current_session->client_addr.s6.sin6_port), len);
 								}
 
-								len = sendto(current_session->dns_fd, buf, len, 0, (struct sockaddr *)&dns_addr, sizeof(dns_addr));
-								if (len == -1)
-								{
-									printf("Error: failed to send data to DNS server\n");
-								}
-								else
-								{
-									printf("Sent %d bytes to DNS server\n", len);
-								}
+							}
+
+							len = sendto(current_session->dns_fd, buf, len, 0, (struct sockaddr *)&dns_addr, sizeof(dns_addr));
+							if (len == -1) {
+								printf("Error: failed to send data to DNS server\n");
+							}
+							else {
+								printf("Sent %d bytes to DNS server\n", len);
 							}
 						}
-					}
-					else if (current_session->ssl_status == SSL_STATUS_ERR) {
-						remove_session(&session_list, &current_session);
-						printf("A session was removed due to a SSL error\n");
 					}
 				}
 			}
 		}
-#ifdef _WIN64
+#ifdef _WIN32
 		Sleep(5);
 #else
 		usleep(5);
 #endif
-
+		time(&now);
 		current_session = session_list;
+		struct session *removenode = NULL;
 		while (current_session != NULL) {
-			if (current_session->ssl_status == SSL_STATUS_ERR || SSL_get_shutdown(current_session->ssl) & SSL_RECEIVED_SHUTDOWN) {
-				struct session *removenode = current_session;
+			if (current_session->thread_status == THREAD_STATUS_RUNNING){
+				if (current_session->ssl_status == SSL_STATUS_ERR) {
+					current_session->thread_status = THREAD_STATUS_STOPPING;
+					printf("Bad data.\n");
+				}
+				else if (SSL_get_shutdown(current_session->ssl) & SSL_RECEIVED_SHUTDOWN) {
+					current_session->thread_status = THREAD_STATUS_STOPPING;
+					printf("A session was shutdown.\n");
+				}
+				else if (now - current_session->active_time > SESSION_TIMEOUT) {
+					int r = SSL_shutdown(current_session->ssl);
+					if (r != 0) {
+						printf("A session timed out.\n");
+						current_session->thread_status = THREAD_STATUS_STOPPING;
+					}
+				}
+			}
+			if (current_session->thread_status == THREAD_STATUS_DEAD) {
+				removenode = current_session;
 				current_session = current_session->next;
 				remove_session(&session_list, &removenode);
-				printf("A session was removed.\n");
 				continue;
 			}
 			else {
@@ -533,7 +554,7 @@ void start() {
 		}
 	}
 	THREAD_cleanup();
-#ifdef _WIN64
+#ifdef _WIN32
 	WSACleanup();
 #endif
 }

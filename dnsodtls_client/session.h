@@ -1,4 +1,4 @@
-#ifdef _WIN64
+#ifdef _WIN32
 #include <winsock2.h>
 #include <Ws2tcpip.h>
 #define in_port_t u_short
@@ -23,17 +23,18 @@
 
 union mysockaddr
 {
-    struct sockaddr_storage ss;
-    struct sockaddr_in6 s6;
-    struct sockaddr_in s4;
+	struct sockaddr_storage ss;
+	struct sockaddr_in6 s6;
+	struct sockaddr_in s4;
 };
 
 typedef struct session
 {
-    unsigned short id;
-    union mysockaddr from;
-    struct session *next;
-    struct session *prev;
+	unsigned short id;
+	union mysockaddr from;
+	time_t start_time;
+	struct session *next;
+	struct session *prev;
 } session;
 
 char addrbuf[INET6_ADDRSTRLEN];
@@ -43,4 +44,5 @@ int get_session_count(session *session_list);
 session *get_session(session *session_list, unsigned short id);
 int add_session(session **psession_list, unsigned short id, union mysockaddr from);
 int remove_session(session **psession_list, session **psession);
+void clear_session(session **psession_list);
 

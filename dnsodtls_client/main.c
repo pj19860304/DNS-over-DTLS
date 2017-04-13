@@ -1,6 +1,6 @@
 #include "session.h"
 
-#if _WIN64
+#if _WIN32
 #pragma comment(lib,"ws2_32.lib")
 #pragma comment(lib,"libssl.lib")
 #pragma comment(lib,"libcrypto.lib")
@@ -8,6 +8,8 @@
 
 #define BUFFER_SIZE          65536
 #define COOKIE_SECRET_LENGTH 16
+#define DNS_TIMEOUT 10 //second
+#define SESSION_TIMEOUT 5 //second
 
 int verbose = 1;
 int veryverbose = 1;
@@ -18,6 +20,9 @@ union mysockaddr dns_local_addr;
 int dns_fd, dtls_fd;
 SSL_CTX *ctx;
 SSL *ssl;
+session *session_list = NULL;
+time_t active_time;
+time_t now;
 
 int handle_socket_error()
 {
@@ -133,7 +138,7 @@ void init_dns_socket()
 	}
 }
 
-int init_dtls_socket()
+void init_dtls_socket()
 {
 	dtls_fd = socket(remote_addr.ss.ss_family, SOCK_DGRAM, 0);
 	if (dtls_fd < 0)
@@ -210,24 +215,56 @@ void create_ssl()
 	if (veryverbose && SSL_get_peer_certificate(ssl))
 	{
 		printf("------------------------------------------------------------\n");
-	/*	X509_NAME_print_ex_fp(stdout, X509_get_subject_name(SSL_get_peer_certificate(ssl)),
-			1, XN_FLAG_MULTILINE);
-		printf("\n\n Cipher: %s", SSL_CIPHER_get_name(SSL_get_current_cipher(ssl)));*/
+		/*	X509_NAME_print_ex_fp(stdout, X509_get_subject_name(SSL_get_peer_certificate(ssl)),
+				1, XN_FLAG_MULTILINE);*/
+
+		printf("\n\n Cipher: %s", SSL_CIPHER_get_name(SSL_get_current_cipher(ssl)));
 		printf("\n------------------------------------------------------------\n\n");
+	}
+}
+
+void reconnect()
+{
+	clear_session(&session_list);
+	init_dtls_socket();
+	create_ssl(dtls_fd);
+}
+
+#ifdef  _WIN32
+DWORD WINAPI maintain_connection_state(LPVOID *info) {
+#else
+void* maintain_connection_state(void *info) {
+#endif
+	while (1)
+	{
+		time(&now);
+		if (-1 != SSL_heartbeat(ssl))
+		{
+			time(&active_time);
+		}
+		if (now - active_time > SESSION_TIMEOUT)
+		{
+			printf("DTLS session timed out.\n");
+			exit(EXIT_FAILURE);
+		}
+#ifdef _WIN32
+		Sleep(1000);
+#else
+		usleep(1000);
+#endif
 	}
 }
 
 void start()
 {
 	union mysockaddr dns_from_addr;
-	int ret;
+	int ret, len;
 	unsigned short transaction_id;
-	socklen_t len;
 	struct timeval dtls_timeout;
 	struct timeval dns_timeout;
 	fd_set fds;
 	int sessioncount = 0;
-	session *session_list = NULL;
+	session *current_session;
 	socklen_t from_len = sizeof(dns_from_addr);
 	memset((void *)&dns_from_addr, 0, sizeof(struct sockaddr_storage));
 
@@ -235,6 +272,21 @@ void start()
 	init_dtls_socket();
 	init_ssl_ctx();
 	create_ssl(dtls_fd);
+
+	time(&active_time);
+
+#ifdef _WIN32
+	DWORD tid;
+	if (CreateThread(NULL, 0, maintain_connection_state, NULL, 0, &tid) == NULL) {
+		exit(EXIT_FAILURE);
+	}
+#else
+	pthread_t tid;
+	if (pthread_create(&tid, NULL, maintain_connection_state, NULL) != 0) {
+		//  perror("pthread_create");
+		exit(EXIT_FAILURE);
+	}
+#endif
 
 	while (1)
 	{
@@ -297,6 +349,9 @@ void start()
 				if (SSL_get_shutdown(ssl) & SSL_RECEIVED_SHUTDOWN)
 				{
 					printf("Error: SSL has shutdown\n");
+					//SSL_shutdown(ssl);
+					printf("SSL has shutdown.\n");
+					reconnect();
 				}
 				else
 				{
@@ -322,17 +377,22 @@ void start()
 		ret = select(dtls_fd + 1, &fds, NULL, NULL, &dtls_timeout);
 		if (ret > 0 && FD_ISSET(dtls_fd, &fds))
 		{
-			if (!(SSL_get_shutdown(ssl) & SSL_RECEIVED_SHUTDOWN))
+			if (SSL_get_shutdown(ssl) & SSL_RECEIVED_SHUTDOWN)
+			{
+				printf("SSL has shutdown.\n");
+				reconnect();
+			}
+			else
 			{
 				len = SSL_read(ssl, buf, sizeof(buf));
-				if (len != -1)
+				if (len > 0)
 				{
 					printf("Received %d bytes from DTLS server\n", len);
 					//send to client
 					transaction_id = *(unsigned short*)buf;
-					session *current_session = get_session(session_list, transaction_id);
+					current_session = get_session(session_list, transaction_id);
 					if (current_session != NULL)
-					{		
+					{
 						len = sendto(dns_fd, buf, len, 0, (struct sockaddr *)&current_session->from, sizeof(current_session->from));
 						if (len == -1)
 						{
@@ -363,15 +423,38 @@ void start()
 						}
 					}
 				}
+				else if (len == 0)
+				{
+					//shutdown
+					if (SSL_get_shutdown(ssl) & SSL_RECEIVED_SHUTDOWN)
+					{
+						printf("SSL has shutdown\n");
+						reconnect();
+					}
+				}
 				else
 				{
-					handle_ssl_error(ssl, len, buf);
+					handle_ssl_error(ret);
 				}
 			}
 		}
 
-		/* Send heartbeat. Requires Heartbeat extension. */
-		//SSL_heartbeat(ssl);		
+		current_session = session_list;
+		struct session *removenode = NULL;
+		time(&now);
+		while (current_session != NULL) {
+			if (now - current_session->start_time > DNS_TIMEOUT) {
+				removenode = current_session;
+				current_session = current_session->next;
+				remove_session(&session_list, &removenode);
+				printf("A DNS query timed out.\n");
+				continue;
+			}
+			else
+			{
+				current_session = current_session->next;
+			}
+		}
 	}
 }
 
@@ -382,7 +465,7 @@ int main(int argc, char **argv)
 	int remote_port = 853;
 	int dns_port = 53;
 
-#if _WIN64
+#if _WIN32
 	WSADATA wsaData;
 	WSAStartup(MAKEWORD(2, 2), &wsaData);
 #endif
