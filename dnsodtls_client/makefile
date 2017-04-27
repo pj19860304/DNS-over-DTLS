@@ -51,6 +51,7 @@ clean: clean_debug clean_release
 before_debug: 
 	test -d bin/Debug || mkdir -p bin/Debug
 	test -d $(OBJDIR_DEBUG) || mkdir -p $(OBJDIR_DEBUG)
+	cp dns.crt bin/Debug
 
 after_debug: 
 
@@ -73,6 +74,7 @@ clean_debug:
 before_release: 
 	test -d bin/Release || mkdir -p bin/Release
 	test -d $(OBJDIR_RELEASE) || mkdir -p $(OBJDIR_RELEASE)
+	cp dns.crt bin/Release
 
 after_release: 
 

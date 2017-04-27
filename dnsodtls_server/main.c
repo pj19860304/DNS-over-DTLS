@@ -2,10 +2,9 @@
 
 #define BUFFER_SIZE          65536
 #define COOKIE_SECRET_LENGTH 16
-#define SESSION_TIMEOUT 10 //second
-#define SSL_ACCEPT_TIMEOUT 10 //second
+#define SESSION_TIMEOUT 10		//second
 
-int verbose = 1;
+int verbose = 0;
 unsigned char cookie_secret[COOKIE_SECRET_LENGTH];
 int cookie_initialized = 0;
 int openssl_addr_index = 0;
@@ -80,7 +79,7 @@ int generate_cookie(SSL *ssl, unsigned char *cookie, unsigned int *cookie_len) {
 	unsigned int length = 0, resultlength;
 	union mysockaddr peer;
 
-	/* Initialize a random secret */
+	// Initialize a random secret
 	if (!cookie_initialized) {
 		if (!RAND_bytes(cookie_secret, COOKIE_SECRET_LENGTH)) {
 			printf("[ERROR] Failed to setting random cookie secret.\n");
@@ -89,12 +88,12 @@ int generate_cookie(SSL *ssl, unsigned char *cookie, unsigned int *cookie_len) {
 		cookie_initialized = 1;
 	}
 
-	/* Read peer information */
+	// Read peer information
 	// (void) BIO_dgram_get_peer(SSL_get_rbio(ssl), &peer);
 	void *data = SSL_get_ex_data(ssl, openssl_addr_index);
 	memcpy(&peer, data, sizeof(peer));
 
-	/* Create buffer with peer's address and port */
+	// Create buffer with peer's address and port
 	length = 0;
 	switch (peer.ss.ss_family) {
 	case AF_INET:
@@ -137,7 +136,7 @@ int generate_cookie(SSL *ssl, unsigned char *cookie, unsigned int *cookie_len) {
 		break;
 	}
 
-	/* Calculate HMAC of buffer using the secret */
+	// Calculate HMAC of buffer using the secret
 	HMAC(EVP_sha1(), (const void*)cookie_secret, COOKIE_SECRET_LENGTH,
 		(const unsigned char*)buffer, length, result, &resultlength);
 	OPENSSL_free(buffer);
@@ -153,16 +152,16 @@ int verify_cookie(SSL *ssl, const unsigned char *cookie, unsigned int cookie_len
 	unsigned int length = 0, resultlength;
 	union mysockaddr peer;
 
-	/* If secret isn't initialized yet, the cookie can't be valid */
+	// If secret isn't initialized yet, the cookie can't be valid
 	if (!cookie_initialized)
 		return 0;
 
-	/* Read peer information */
+	// Read peer information
 	// (void) BIO_dgram_get_peer(SSL_get_rbio(ssl), &peer);
 	void *data = SSL_get_ex_data(ssl, openssl_addr_index);
 	memcpy(&peer, data, sizeof(peer));
 
-	/* Create buffer with peer's address and port */
+	// Create buffer with peer's address and port
 	length = 0;
 	switch (peer.ss.ss_family) {
 	case AF_INET:
@@ -197,7 +196,7 @@ int verify_cookie(SSL *ssl, const unsigned char *cookie, unsigned int cookie_len
 		break;
 	}
 
-	/* Calculate HMAC of buffer using the secret */
+	// Calculate HMAC of buffer using the secret
 	HMAC(EVP_sha1(), (const void*)cookie_secret, COOKIE_SECRET_LENGTH,
 		(const unsigned char*)buffer, length, result, &resultlength);
 	OPENSSL_free(buffer);
@@ -208,22 +207,13 @@ int verify_cookie(SSL *ssl, const unsigned char *cookie, unsigned int cookie_len
 	return 0;
 }
 
-int dtls_verify_callback(int ok, X509_STORE_CTX *ctx) {
-	/* This function should ask the user
-	 * if he trusts the received certificate.
-	 * Here we always trust.
-	 */
-	return 1;
-}
-
 void init_ssl_ctx() {
 	OpenSSL_add_ssl_algorithms();
 	SSL_load_error_strings();
 	ctx = SSL_CTX_new(DTLS_server_method());
-	/* We accept AES128-SHA
-	* Not recommended beyond testing and debugging
-	*/
-	//SSL_CTX_set_cipher_list(ctx, "AES128-SHA");//ALL:NULL:eNULL:aNULL
+	// We accept AES128-SHA for test
+	// SSL_CTX_set_cipher_list(ctx, "AES128-SHA");//ALL:NULL:eNULL:aNULL
+
 	SSL_CTX_set_session_cache_mode(ctx, SSL_SESS_CACHE_OFF);
 
 	if (!SSL_CTX_use_certificate_file(ctx, "dns.crt", SSL_FILETYPE_PEM)) {
@@ -240,10 +230,7 @@ void init_ssl_ctx() {
 		printf("[ERROR] Invalid private key!\n");
 		exit(EXIT_FAILURE);
 	}
-
-	/* Client has to authenticate */
-	SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER | SSL_VERIFY_CLIENT_ONCE, dtls_verify_callback);
-
+	
 	SSL_CTX_set_read_ahead(ctx, 1);
 	SSL_CTX_set_cookie_generate_cb(ctx, generate_cookie);
 	SSL_CTX_set_cookie_verify_cb(ctx, verify_cookie);
@@ -254,10 +241,9 @@ DWORD WINAPI connection_handle(LPVOID *info) {
 #else
 void* connection_handle(void *info) {
 #endif
-	char buf[BUFFER_SIZE];
+	char threadbuf[BUFFER_SIZE];
 	char addrbuf[INET6_ADDRSTRLEN];
 	struct session *pinfo = (struct session*) info;
-	SSL *ssl = pinfo->ssl;
 	int ret, err_code, len;
 
 	pinfo->thread_status = THREAD_STATUS_RUNNING;
@@ -266,9 +252,9 @@ void* connection_handle(void *info) {
 	pthread_detach(pthread_self());
 #endif
 
-	/* Finish handshake */
+	// start handshake
 	do{
-		ret = SSL_accept(ssl);
+		ret = SSL_accept(pinfo->ssl);
 	} while (ret == 0);
 
 	if (ret < 0) {
@@ -276,7 +262,7 @@ void* connection_handle(void *info) {
 		if (err_code != SSL_ERROR_NONE)
 		{
 			pinfo->thread_status = THREAD_STATUS_DEAD;
-			printf("[ERROR] SSL handshake error:%s\n", ERR_error_string(err_code, buf));
+			printf("[ERROR] SSL handshake error: %s\n", ERR_error_string(err_code, threadbuf));
 #if _WIN32
 			ExitThread(0);
 #else
@@ -290,48 +276,62 @@ void* connection_handle(void *info) {
 	}
 	else {
 		pinfo->ssl_status = SSL_STATUS_ERR;
-		printf("[Error] SSL state: %d", state);
+		if (state == TLS_ST_BEFORE) {
+			printf("[ERROR] Bad data, failed to handshake.\n");
+		}
 		pinfo->thread_status = THREAD_STATUS_DEAD;
 		return 0;
 	}
+	//finish handshake
+	time_t begin;
+	time_t now;
+	time(&begin);
+	while (1) {
+#ifdef _WIN32
+		Sleep(100); //ms
+#else
+		usleep(100000); //us
+#endif
+		time(&now);
+		state = SSL_get_state(pinfo->ssl);
+		if (state == TLS_ST_OK) {
+			break;
+		}
+		else if (now - begin > SESSION_TIMEOUT) {
+			printf("[ERROR] SSL handshake timed out.");
+			pinfo->ssl_status = SSL_STATUS_ERR;
+			pinfo->thread_status = THREAD_STATUS_DEAD;
+		}
+	}
 
-	if (verbose) {
-		if (pinfo->client_addr.ss.ss_family == AF_INET) {
-			printf("Thread %lx: accepted connection from %s:%d\n",
-				id_function(),
-				inet_ntop(AF_INET, &pinfo->client_addr.s4.sin_addr, addrbuf, INET6_ADDRSTRLEN),
-				ntohs(pinfo->client_addr.s4.sin_port));
-		}
-		else {
-			printf("Thread %lx: accepted connection from %s:%d\n",
-				id_function(),
-				inet_ntop(AF_INET6, &pinfo->client_addr.s6.sin6_addr, addrbuf, INET6_ADDRSTRLEN),
-				ntohs(pinfo->client_addr.s6.sin6_port));
-		}
-	
-	/*	if (SSL_get_peer_certificate(ssl)) {
-			printf("------------------------------------------------------------\n");
-			X509_NAME_print_ex_fp(stdout, X509_get_subject_name(SSL_get_peer_certificate(ssl)),
-				1, XN_FLAG_MULTILINE);
-			printf("\n\n Cipher: %s", SSL_CIPHER_get_name(SSL_get_current_cipher(ssl)));
-			printf("\n------------------------------------------------------------\n\n");
-		}*/
+
+	if (pinfo->client_addr.ss.ss_family == AF_INET) {
+		printf("Thread %lx: accepted connection from %s:%d\n",
+			id_function(),
+			inet_ntop(AF_INET, &pinfo->client_addr.s4.sin_addr, addrbuf, INET6_ADDRSTRLEN),
+			ntohs(pinfo->client_addr.s4.sin_port));
+	}
+	else {
+		printf("Thread %lx: accepted connection from %s:%d\n",
+			id_function(),
+			inet_ntop(AF_INET6, &pinfo->client_addr.s6.sin6_addr, addrbuf, INET6_ADDRSTRLEN),
+			ntohs(pinfo->client_addr.s6.sin6_port));
 	}
 
 	union mysockaddr from_addr;
 	socklen_t from_len = sizeof(from_addr);
-	fd_set fds;
-	FD_ZERO(&fds);
+	fd_set dns_fds;
 	struct timeval dns_timeout;
 	while (pinfo->thread_status == THREAD_STATUS_RUNNING)
 	{
 		dns_timeout.tv_sec = 0;
-		dns_timeout.tv_usec = 5;
-		FD_SET(pinfo->dns_fd, &fds);
-		ret = select(pinfo->dns_fd + 1, &fds, NULL, NULL, &dns_timeout);
-		if (ret > 0 && FD_ISSET(pinfo->dns_fd, &fds))
+		dns_timeout.tv_usec = 100;
+		FD_ZERO(&dns_fds);
+		FD_SET(pinfo->dns_fd, &dns_fds);
+		ret = select(pinfo->dns_fd + 1, &dns_fds, NULL, NULL, &dns_timeout);
+		if (ret > 0 && FD_ISSET(pinfo->dns_fd, &dns_fds))
 		{
-			len = recvfrom(pinfo->dns_fd, buf, 4096, 0, (struct sockaddr*)&from_addr, &from_len);
+			len = recvfrom(pinfo->dns_fd, threadbuf, BUFFER_SIZE, 0, (struct sockaddr*)&from_addr, &from_len);
 			if (len == -1) {
 				printf("[Error] Failed to receive data from dns server.\n");
 			}
@@ -340,7 +340,7 @@ void* connection_handle(void *info) {
 					printf("Received %d bytes from dns server.\n", len);
 
 				if (pinfo->ssl_status == SSL_STATUS_OK && !(SSL_get_shutdown(pinfo->ssl) & SSL_RECEIVED_SHUTDOWN)) {
-					if (SSL_write(pinfo->ssl, buf, len) > 0) {
+					if (SSL_write(pinfo->ssl, threadbuf, len) > 0) {
 						if (verbose)
 							printf("Sent %d bytes to dtls client.\n", len);
 					}
@@ -349,7 +349,7 @@ void* connection_handle(void *info) {
 					}
 				}
 				else {
-					printf("[Error] Unable to send data to client because SSL has shutdown, exit thread.\n");
+					printf("[Error] Failed to send data to dtls client: SSL has shutdown.\n");
 					pinfo->thread_status = THREAD_STATUS_DEAD;
 #if _WIN32
 					ExitThread(0);
@@ -359,6 +359,12 @@ void* connection_handle(void *info) {
 				}
 			}
 		}
+
+#ifdef _WIN32
+		Sleep(10); //ms
+#else
+		usleep(10000); //us
+#endif
 	}
 	pinfo->thread_status = THREAD_STATUS_DEAD;
 	return 0;
@@ -390,6 +396,7 @@ void start() {
 #ifdef SO_REUSEPORT
 	setsockopt(dtls_fd, SOL_SOCKET, SO_REUSEPORT, (const void*)&on, (socklen_t) sizeof(on));
 #endif
+
 	if (server_addr.ss.ss_family == AF_INET) {
 		if (-1 == bind(dtls_fd, (const struct sockaddr *) &server_addr, sizeof(struct sockaddr_in))) {
 			perror("[Error] Failed to open UDP socket for DTLS\n");
@@ -411,7 +418,6 @@ void start() {
 
 	struct timeval dtls_timeout;
 	fd_set fds;
-	FD_ZERO(&fds);
 	memset(&client_addr, 0, sizeof(struct sockaddr_storage));
 
 	session* current_session = NULL;
@@ -419,26 +425,26 @@ void start() {
 		sessioncount = get_session_count(session_list);
 		if (sessioncount != client_count) {
 			client_count = sessioncount;
-			printf("The number of clients becomes %d.\n", client_count);
+			printf("The number of clients becomes %d\n", client_count);
 		}
 
 		dtls_timeout.tv_sec = 0;
-		dtls_timeout.tv_usec = 500;
-		FD_SET(dtls_fd, &fds);
+		dtls_timeout.tv_usec = 100;
+		FD_ZERO(&fds);
+		FD_SET(dtls_fd, &fds);		
 		ret = select(dtls_fd + 1, &fds, NULL, NULL, &dtls_timeout);
 		if (ret > 0 && FD_ISSET(dtls_fd, &fds)) {
 			if (server_addr.ss.ss_family == AF_INET) {
-				len = recvfrom(dtls_fd, buf, 4096, 0, (struct sockaddr *) &client_addr, &from_len);
+				len = recvfrom(dtls_fd, buf, BUFFER_SIZE, 0, (struct sockaddr *) &client_addr, &from_len);
 			}
 			else {
-				len = recvfrom(dtls_fd, buf, 4096, 0, (struct sockaddr *) &client_addr, &from_len);
+				len = recvfrom(dtls_fd, buf, BUFFER_SIZE, 0, (struct sockaddr *) &client_addr, &from_len);
 			}
-
 			if (len > 0) {
 				current_session = get_session(session_list, client_addr);
 				if (current_session == NULL) {
 					SSL *ssl = SSL_new(ctx);
-					/* set up the memory-buffer BIOs */
+					// set up the memory-buffer BIOs
 					BIO *for_reading = BIO_new(BIO_s_mem());
 					BIO *for_writing = BIO_new(BIO_s_mem());
 					BIO_set_mem_eof_return(for_reading, -1);
@@ -513,11 +519,14 @@ void start() {
 				}
 			}
 		}
+
 #ifdef _WIN32
-		Sleep(5);
+		Sleep(10); //ms
 #else
-		usleep(5);
+		usleep(10000); //us
 #endif
+		
+		//session
 		time(&now);
 		current_session = session_list;
 		struct session *removenode = NULL;
@@ -525,7 +534,6 @@ void start() {
 			if (current_session->thread_status == THREAD_STATUS_RUNNING){
 				if (current_session->ssl_status == SSL_STATUS_ERR) {
 					current_session->thread_status = THREAD_STATUS_STOPPING;
-					printf("[ERROR] Bad data.\n");
 				}
 				else if (SSL_get_shutdown(current_session->ssl) & SSL_RECEIVED_SHUTDOWN) {
 					current_session->thread_status = THREAD_STATUS_STOPPING;
@@ -548,10 +556,10 @@ void start() {
 			}
 			else {
 				if (BIO_ctrl_pending(current_session->for_writing) > 0) {
-					/* Read the data out of the for_writing bio */
+					// Read the data out of the for_writing bio
 					int outsize = BIO_read(current_session->for_writing, buf, sizeof(buf));
 
-					/* send it out the udp port */
+					// send it out the udp port
 					if (current_session->client_addr.ss.ss_family == AF_INET) {
 						len = sendto(dtls_fd, buf, outsize, 0, (const struct sockaddr *)&current_session->client_addr.s4, sizeof(struct sockaddr_in));
 					}

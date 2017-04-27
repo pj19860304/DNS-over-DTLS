@@ -44,5 +44,6 @@ int get_session_count(session *session_list);
 session *get_session(session *session_list, unsigned short id);
 int add_session(session **psession_list, unsigned short id, union mysockaddr from);
 int remove_session(session **psession_list, session **psession);
+int remove_sessions(session **psession_list, unsigned short id);
 void clear_session(session **psession_list);
 

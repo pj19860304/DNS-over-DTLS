@@ -90,6 +90,41 @@ int remove_session(session **psession_list, session **psession)
 	return 1;
 }
 
+int remove_sessions(session **psession_list, unsigned short id)
+{
+	session *current = *psession_list;
+	session *tmp = NULL;
+
+	if (NULL == current)
+	{
+		return 0;
+	}
+
+	while (NULL != current)
+	{
+		if ((current->id == id))
+		{
+			if (current->next != NULL)
+				current->next->prev = current->prev;
+			if (current->prev != NULL)
+				current->prev->next = current->next;
+			else
+				*psession_list = current->next;
+			tmp = current->next;
+			free(current);
+			current = tmp;
+		}
+		else
+		{
+			current = current->next;
+		}			
+	}
+
+
+	
+	return 1;
+}
+
 void clear_session(session **psession_list)
 {
 	while (NULL != *psession_list)

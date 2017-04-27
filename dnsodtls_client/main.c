@@ -9,7 +9,7 @@
 #define BUFFER_SIZE          65536
 #define COOKIE_SECRET_LENGTH 16
 #define DNS_TIMEOUT 15 //second
-#define SESSION_TIMEOUT 5 //second
+#define SESSION_TIMEOUT 10 //second
 
 int verbose = 1;
 int dns_client_count = 0;
@@ -20,66 +20,72 @@ int dns_fd, dtls_fd;
 SSL_CTX *ctx;
 SSL *ssl;
 session *session_list = NULL;
-time_t active_time;
+time_t active_time, heartbeat_time;
 time_t now;
-/*
-int handle_socket_error()
-{
-printf("Error: ");
-switch (errno)
-{
-case EINTR:
-// Interrupted system call.
-// Just ignore.
-printf("Interrupted system call!\n");
-return 1;
-case EBADF:
-//Invalid socket.
-// Must close connection.
-printf("Invalid socket!\n");
-return 0;
-break;
+int connected = 0;
+
+int handle_socket_error() {
+	printf("[ERROR] ");
+	switch (errno) {
+	case EINTR:
+		/* Interrupted system call.
+		* Just ignore.
+		*/
+		printf("Interrupted system call!\n");
+		return 1;
+	case EBADF:
+		/* Invalid socket.
+		* Must close connection.
+		*/
+		printf("Invalid socket!\n");
+		return 0;
+		break;
 #ifdef EHOSTDOWN
-case EHOSTDOWN:
-// Host is down.
-// Just ignore, might be an attacker
-// sending fake ICMP messages.
-printf("Host is down!\n");
-return 1;
+	case EHOSTDOWN:
+		/* Host is down.
+		* Just ignore, might be an attacker
+		* sending fake ICMP messages.
+		*/
+		printf("Host is down!\n");
+		return 1;
 #endif
 #ifdef ECONNRESET
-case ECONNRESET:
-// Connection reset by peer.
-// Just ignore, might be an attacker
-// sending fake ICMP messages.
-printf("Connection reset by peer!\n");
-return 1;
+	case ECONNRESET:
+		/* Connection reset by peer.
+		* Just ignore, might be an attacker
+		* sending fake ICMP messages.
+		*/
+		printf("Connection reset by peer!\n");
+		return 1;
 #endif
-case ENOMEM:
-// Out of memory.
-// Must close connection.
-printf("Out of memory!\n");
-return 0;
-break;
-case EACCES:
-// Permission denied.
-// Just ignore, we might be blocked by some firewall policy. Try again and hope for the best.
-printf("Permission denied!\n");
-return 1;
-break;
-default:
-//Something unexpected happened
-printf("Unexpected error! (errno = %d)\n", errno);
-return 0;
-break;
+	case ENOMEM:
+		/* Out of memory.
+		* Must close connection.
+		*/
+		printf("Out of memory!\n");
+		return 0;
+		break;
+	case EACCES:
+		/* Permission denied.
+		* Just ignore, we might be blocked
+		* by some firewall policy. Try again
+		* and hope for the best.
+		*/
+		printf("Permission denied!\n");
+		return 1;
+		break;
+	default:
+		/* Something unexpected happened */
+		printf("Unexpected error! (errno = %d)\n", errno);
+		return 0;
+		break;
+	}
+	return 0;
 }
-return 0;
-}*/
 
 int handle_ssl_error(int code)
 {
-	int a = SSL_get_error(ssl, code);
-	switch (a)
+	switch (SSL_get_error(ssl, code))
 	{
 	case SSL_ERROR_NONE:
 		break;
@@ -90,16 +96,12 @@ int handle_ssl_error(int code)
 		/* continue with reading */
 		break;
 	case SSL_ERROR_SYSCALL:
-		printf("Socket write error: ");
-		//	if (!handle_socket_error()) exit(1);
-		break;
-	case SSL_ERROR_SSL:
-		perror("SSL write error");
-		exit(1);
+		if (!handle_socket_error())
+			exit(EXIT_FAILURE);
 		break;
 	default:
-		printf("Unexpected error while writing!\n");
-		exit(1);
+		printf("[ERROR] SSL error!\n");
+		exit(EXIT_FAILURE);
 		break;
 	}
 	return 0;
@@ -112,7 +114,7 @@ void init_dns_socket()
 	dns_fd = socket(dns_local_addr.ss.ss_family, SOCK_DGRAM, 0);
 	if (dns_fd == -1)
 	{
-		perror("[Error] Failed to open UDP socket for local DNS");
+		perror("[ERROR] Failed to open UDP socket for local DNS.\n");
 		exit(EXIT_FAILURE);
 	}
 
@@ -135,6 +137,7 @@ void init_dtls_socket()
 	dtls_fd = socket(remote_addr.ss.ss_family, SOCK_DGRAM, 0);
 	if (dtls_fd < 0)
 	{
+		perror("[ERROR] Failed to open UDP socket for dtls.\n");
 		exit(EXIT_FAILURE);
 	}
 	connect(dtls_fd, (struct sockaddr *) &remote_addr, sizeof(remote_addr));
@@ -158,6 +161,8 @@ int dtls_verify_callback(int preverify_ok, X509_STORE_CTX *ctx) {
 			memcmp(k1->data, k2->data, (size_t)k1->length) == 0)
 			ret = 1; /* accept */
 	}
+	BIO_set_close(bio_cert, BIO_CLOSE);
+	BIO_free(bio_cert);
 	X509_free(localcert);
 	return ret;
 }
@@ -168,17 +173,7 @@ void init_ssl_ctx()
 	SSL_load_error_strings();
 
 	ctx = SSL_CTX_new(DTLS_client_method());
-//	SSL_CTX_set_cipher_list(ctx, "AES128-SHA");
-
-/*	if (!SSL_CTX_use_certificate_file(ctx, "client.pem", SSL_FILETYPE_PEM))
-		printf("[ERROR] No certificate found!\n");
-
-	if (!SSL_CTX_use_PrivateKey_file(ctx, "client.pem", SSL_FILETYPE_PEM))
-		printf("[ERROR] No private key found!\n");
-
-	if (!SSL_CTX_check_private_key(ctx))
-		printf("[ERROR] Invalid private key!\n");
-		*/
+	//	SSL_CTX_set_cipher_list(ctx, "AES128-SHA");
 
 	SSL_CTX_set_verify_depth(ctx, 2);
 	SSL_CTX_set_read_ahead(ctx, 1);
@@ -186,11 +181,11 @@ void init_ssl_ctx()
 	SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER | SSL_VERIFY_CLIENT_ONCE, dtls_verify_callback);
 }
 
-void create_ssl()
+int create_ssl()
 {
 	ssl = SSL_new(ctx);
 
-	/* Create BIO, connect and set to already connected */
+	// Create BIO, connect and set to already connected
 	BIO *bio = BIO_new_dgram(dtls_fd, BIO_CLOSE);
 	BIO_ctrl(bio, BIO_CTRL_DGRAM_SET_CONNECTED, 0, &remote_addr.ss);
 
@@ -198,10 +193,10 @@ void create_ssl()
 
 	if (SSL_connect(ssl) < 0)
 	{
-		perror("[ERROR] Failed to connect DTLS server");
-		exit(EXIT_FAILURE);
+		printf("[ERROR] Failed to connect server.\n");
+		return 0;
 	}
-
+	
 	if (verbose)
 	{
 		if (remote_addr.ss.ss_family == AF_INET)
@@ -220,26 +215,47 @@ void create_ssl()
 		X509 *cer = SSL_get_peer_certificate(ssl);
 		if (cer)
 		{
-			printf("------------------------------------------------------------\n");	
+			printf("------------------------------------------------------------\n");
 #if _WIN32
 			printf("%s", X509_NAME_oneline(X509_get_subject_name(SSL_get_peer_certificate(ssl)), buf, 65535));
 #else
 			X509_NAME_print_ex_fp(stdout, X509_get_subject_name(SSL_get_peer_certificate(ssl)), 1, XN_FLAG_MULTILINE);
 #endif
-	
+
 			//EVP_PKEY *pkey = X509_get_pubkey(cer);		
 
 			printf("\n\n Cipher: %s", SSL_CIPHER_get_name(SSL_get_current_cipher(ssl)));
 			printf("\n------------------------------------------------------------\n\n");
 		}
 	}
+	connected = 1;
+	return 1;
 }
 
 void reconnect()
 {
-	clear_session(&session_list);
-	init_dtls_socket();
-	create_ssl(dtls_fd);
+	connected = 0;
+	int count = 5;
+	while (count > 0)
+	{
+		printf("Reconnect...\n");
+		clear_session(&session_list);
+		init_dtls_socket();
+		if (create_ssl(dtls_fd))
+			break;
+		else
+			count --;
+#ifdef _WIN32
+		Sleep(5000);
+#else
+		usleep(5000000);
+#endif
+	}
+	if (!connected)
+	{
+		printf("Exit.\n");
+		exit(EXIT_FAILURE);
+	}
 }
 
 void show_session_count()
@@ -261,9 +277,9 @@ void start()
 	int ret;
 	unsigned short transaction_id;
 	int len;
-	struct timeval dtls_timeout;
-	struct timeval dns_timeout;
+	struct timeval timeout;
 	fd_set fds;
+	int maxfdp;
 	session *current_session;
 	socklen_t from_len = sizeof(dns_from_addr);
 	memset((void *)&dns_from_addr, 0, sizeof(struct sockaddr_storage));
@@ -271,154 +287,159 @@ void start()
 	init_dns_socket();
 	init_dtls_socket();
 	init_ssl_ctx();
-	create_ssl(dtls_fd);
+	if (!create_ssl(dtls_fd))
+		reconnect();
 
 	time(&active_time);
+	time(&heartbeat_time);
 
 	while (1)
 	{
-		dns_timeout.tv_sec = 0;
-		dns_timeout.tv_usec = 50;
+		if (!connected)
+		{
+#ifdef _WIN32
+			Sleep(1000);
+#else
+			usleep(1000000);
+#endif
+			continue;
+		}
+		timeout.tv_sec = 5;
+		timeout.tv_usec = 0;
 		FD_ZERO(&fds);
 		FD_SET(dns_fd, &fds);
-
-		ret = select(dns_fd + 1, &fds, NULL, NULL, &dns_timeout);
-		if (ret > 0 && FD_ISSET(dns_fd, &fds))
+		FD_SET(dtls_fd, &fds);
+		maxfdp = dns_fd > dtls_fd ? dns_fd + 1 : dtls_fd + 1;
+		ret = select(maxfdp, &fds, NULL, NULL, &timeout);
+		if (ret > 0)
 		{
-			len = recvfrom(dns_fd, buf, BUFFER_SIZE, 0, (struct sockaddr*)&dns_from_addr, &from_len);
-			if (len == -1)
+			if (FD_ISSET(dns_fd, &fds))
 			{
-				if (dns_from_addr.ss.ss_family == AF_INET)
-				{
-					printf("[ERROR] Failed to receive DNS data from %s:%d, %s.\n",
-						inet_ntop(AF_INET, &dns_from_addr.s4.sin_addr, addrbuf, INET6_ADDRSTRLEN),
-						dns_from_addr.s4.sin_port,
-						strerror(errno));
-				}
-				else
-				{
-					printf("[ERROR] Failed to receive DNS data from %s:%d, %s.\n",
-						inet_ntop(AF_INET6, &dns_from_addr.s6.sin6_addr, addrbuf, INET6_ADDRSTRLEN),
-						dns_from_addr.s4.sin_port,
-						strerror(errno));
-				}
-				/*	if (handle_socket_error())
-				{
-				SSL_shutdown(ssl);
-				exit(EXIT_FAILURE);
-				}*/
-			}
-			else
-			{
-				if (verbose)
+				len = recvfrom(dns_fd, buf, BUFFER_SIZE, 0, (struct sockaddr*)&dns_from_addr, &from_len);
+				if (len == -1)
 				{
 					if (dns_from_addr.ss.ss_family == AF_INET)
 					{
-						printf("Received DNS request from %s:%d, length:%d.\n",
+						printf("[ERROR] Failed to receive DNS data from %s:%d, %s.\n",
 							inet_ntop(AF_INET, &dns_from_addr.s4.sin_addr, addrbuf, INET6_ADDRSTRLEN),
-							dns_from_addr.s4.sin_port, len);
+							ntohs(dns_from_addr.s4.sin_port),
+							strerror(errno));
 					}
 					else
 					{
-						printf("Received DNS request from %s:%d, length:%d.\n",
+						printf("[ERROR] Failed to receive DNS data from %s:%d, %s.\n",
 							inet_ntop(AF_INET6, &dns_from_addr.s6.sin6_addr, addrbuf, INET6_ADDRSTRLEN),
-							dns_from_addr.s6.sin6_port, len);
-					}
+							ntohs(dns_from_addr.s4.sin_port),
+							strerror(errno));
+					}					
 				}
-
-				transaction_id = *(unsigned short*)buf;
-				add_session(&session_list, transaction_id, dns_from_addr);
-				show_session_count();
-
-				//DTLS Send
-				if (SSL_get_shutdown(ssl) & SSL_RECEIVED_SHUTDOWN)
+				else
 				{
 					if (verbose)
-						printf("[ERROR] SSL has shutdown.\n");
+					{
+						if (dns_from_addr.ss.ss_family == AF_INET)
+						{
+							printf("Received DNS request from %s:%d, length:%d.\n",
+								inet_ntop(AF_INET, &dns_from_addr.s4.sin_addr, addrbuf, INET6_ADDRSTRLEN),
+								ntohs(dns_from_addr.s4.sin_port), len);
+						}
+						else
+						{
+							printf("Received DNS request from %s:%d, length:%d.\n",
+								inet_ntop(AF_INET6, &dns_from_addr.s6.sin6_addr, addrbuf, INET6_ADDRSTRLEN),
+								ntohs(dns_from_addr.s6.sin6_port), len);
+						}
+					}
+
+					transaction_id = *(unsigned short*)buf;
+					add_session(&session_list, transaction_id, dns_from_addr);
+					show_session_count();
+
+					//DTLS Send
+					if (SSL_get_shutdown(ssl) & SSL_RECEIVED_SHUTDOWN)
+					{
+						if (verbose)
+							printf("[ERROR] SSL has shutdown.\n");
+						reconnect();
+					}
+					else
+					{
+						ret = SSL_write(ssl, buf, len);
+						time(&active_time);
+						if (ret != -1)
+						{
+							if (verbose)
+								printf("Sent %d bytes to DTLS server.\n", (int)len);
+						}
+						else
+						{
+							handle_ssl_error(ret);
+						}
+					}
+				}
+			}
+			else if (FD_ISSET(dtls_fd, &fds))
+			{
+				//DTLS Read
+				if (SSL_get_shutdown(ssl) & SSL_RECEIVED_SHUTDOWN)
+				{
+					printf("[ERROR] SSL has shutdown.\n");
 					reconnect();
 				}
 				else
 				{
-					ret = SSL_write(ssl, buf, len);
-					if (ret != -1)
+					len = SSL_read(ssl, buf, sizeof(buf));
+					time(&active_time);
+					if (len > 0)
 					{
 						if (verbose)
-							printf("Sent %d bytes to DTLS server.\n", (int)len);
+							printf("Received %d bytes from DTLS server.\n", len);
+						//send to client
+						transaction_id = *(unsigned short*)buf;
+						current_session = get_session(session_list, transaction_id);
+						if (current_session != NULL)
+						{
+							len = sendto(dns_fd, buf, len, 0, (struct sockaddr *)&current_session->from, sizeof(current_session->from));
+							if (len == -1)
+							{
+								perror("[ERROR] Failed to send DNS response.\n");
+							}
+							else if (verbose)
+							{
+								if (current_session->from.ss.ss_family == AF_INET)
+								{
+									printf("Sent DNS Response to %s:%d.\n",
+										inet_ntop(AF_INET, &current_session->from.s4.sin_addr, addrbuf, INET6_ADDRSTRLEN),
+										ntohs(dns_from_addr.s4.sin_port));
+								}
+								else
+								{
+									printf("Sent DNS Response to %s:%d.\n",
+										inet_ntop(AF_INET6, &current_session->from.s6.sin6_addr, addrbuf, INET6_ADDRSTRLEN),
+										ntohs(dns_from_addr.s6.sin6_port));
+								}
+							}
+							//remove_session(&session_list, &current_session);
+							remove_sessions(&session_list, transaction_id);
+							if (verbose)
+							{
+								show_session_count();
+							}
+						}
+					}
+					else if (len == 0)
+					{
+						//shutdown
+						if (SSL_get_shutdown(ssl) & SSL_RECEIVED_SHUTDOWN)
+						{
+							printf("[ERROR] SSL has shutdown.\n");
+							reconnect();
+						}
 					}
 					else
 					{
 						handle_ssl_error(ret);
 					}
-				}
-			}
-		}
-
-		//DTLS Read
-		dtls_timeout.tv_sec = 0;
-		dtls_timeout.tv_usec = 50;
-		FD_ZERO(&fds);
-		FD_SET(dtls_fd, &fds);
-
-		ret = select(dtls_fd + 1, &fds, NULL, NULL, &dtls_timeout);
-		if (ret > 0 && FD_ISSET(dtls_fd, &fds))
-		{
-			if (SSL_get_shutdown(ssl) & SSL_RECEIVED_SHUTDOWN)
-			{
-				printf("[ERROR] SSL has shutdown.\n");
-				reconnect();
-			}
-			else
-			{
-				len = SSL_read(ssl, buf, sizeof(buf));
-				time(&active_time);
-				if (len > 0)
-				{
-					if (verbose)
-						printf("Received %d bytes from DTLS server.\n", len);
-					//send to client
-					transaction_id = *(unsigned short*)buf;
-					current_session = get_session(session_list, transaction_id);
-					if (current_session != NULL)
-					{
-						len = sendto(dns_fd, buf, len, 0, (struct sockaddr *)&current_session->from, sizeof(current_session->from));
-						if (len == -1)
-						{
-							perror("[Error] Failed to send DNS response");
-						}
-						else if (verbose)
-						{
-							if (current_session->from.ss.ss_family == AF_INET)
-							{
-								printf("Sent DNS Response to %s:%d.\n",
-									inet_ntop(AF_INET, &current_session->from.s4.sin_addr, addrbuf, INET6_ADDRSTRLEN),
-									dns_from_addr.s4.sin_port);
-							}
-							else
-							{
-								printf("Sent DNS Response to %s:%d.\n",
-									inet_ntop(AF_INET6, &current_session->from.s6.sin6_addr, addrbuf, INET6_ADDRSTRLEN),
-									dns_from_addr.s6.sin6_port);
-							}
-						}
-						remove_session(&session_list, &current_session);
-						if (verbose)
-						{
-							show_session_count();
-						}
-					}
-				}
-				else if (len == 0)
-				{
-					//shutdown
-					if (SSL_get_shutdown(ssl) & SSL_RECEIVED_SHUTDOWN)
-					{
-						printf("[ERROR] SSL has shutdown.\n");
-						reconnect();
-					}
-				}
-				else
-				{
-					handle_ssl_error(ret);
 				}
 			}
 		}
@@ -441,9 +462,10 @@ void start()
 		}
 
 		time(&now);
-		if (now - active_time > 2)
+		if (now - heartbeat_time >= 2 && now - active_time >= 2)
 		{
 			//Send heartbeat. Requires Heartbeat extension.
+			time(&heartbeat_time);
 			if (-1 != SSL_heartbeat(ssl))
 			{
 				time(&active_time);
@@ -455,7 +477,7 @@ void start()
 			if (now - active_time > SESSION_TIMEOUT)
 			{
 				printf("[ERROR] DTLS session timed out.\n");
-				exit(EXIT_FAILURE);
+				reconnect();
 			}
 		}
 	}
